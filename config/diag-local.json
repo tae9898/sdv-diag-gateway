@@ -1,0 +1,28 @@
+{
+    "unicast": "127.0.0.1",
+    "logging": {
+        "level": "info",
+        "console": "true"
+    },
+    "applications": [
+        {
+            "name": "diag_service",
+            "id": "0x4444"
+        },
+        {
+            "name": "diag_client",
+            "id": "0x5555"
+        }
+    ],
+    "services": [
+        {
+            "service": "0x1234",
+            "instance": "0x0001",
+            "unreliable": "30510"
+        }
+    ],
+    "routing": "diag_service",
+    "service-discovery": {
+        "enable": "false"
+    }
+}
