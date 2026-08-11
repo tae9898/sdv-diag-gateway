@@ -1,4 +1,6 @@
-// Phase 1: minimal vsomeip diagnostic client — requests DID 0xF190 (VIN)
+// Phase 2: vsomeip diagnostic client — sends a raw UDS ReadDataByIdentifier
+// {0x22,0xF1,0x90} (DID 0xF190 = VIN) and prints the real VIN returned by the
+// in-process C UDS engine.
 #include <csignal>
 #include <cstdio>
 #include <string>
@@ -12,8 +14,7 @@
 
 static const vsomeip::service_t  SERVICE_ID  = 0x1234;
 static const vsomeip::instance_t INSTANCE_ID = 0x0001;
-static const vsomeip::method_t   METHOD_ID   = 0x0001; // ReadDataByIdentifier
-static const uint16_t           DID_VIN     = 0xF190;
+static const vsomeip::method_t   METHOD_ID   = 0x0001; // UDS passthrough
 
 class diag_client {
 public:
@@ -55,14 +56,15 @@ private:
 
     void on_avail(vsomeip::service_t s, vsomeip::instance_t i, bool avail) {
         if (s == SERVICE_ID && i == INSTANCE_ID && avail) {
-            printf("diag_client: service available, sending DID 0x%04x\n", DID_VIN);
+            printf("diag_client: service available, sending UDS ReadDataByIdentifier {0x22,0xF1,0x90}\n");
             auto rq = rtm_->create_request();
             rq->set_service(SERVICE_ID);
             rq->set_instance(INSTANCE_ID);
             rq->set_method(METHOD_ID);
             auto pl = rtm_->create_payload();
-            pl->set_data({static_cast<vsomeip::byte_t>(DID_VIN >> 8),
-                          static_cast<vsomeip::byte_t>(DID_VIN & 0xFF)});
+            // Raw UDS request: SID 0x22 ReadDataByIdentifier, DID 0xF190 (VIN).
+            std::vector<vsomeip::byte_t> uds_req = {0x22, 0xF1, 0x90};
+            pl->set_data(uds_req);
             rq->set_payload(pl);
             app_->send(rq);
         }
@@ -78,17 +80,20 @@ private:
         const auto* data = pl->get_data();
         auto len = pl->get_length();
 
-        if (len >= 2) {
-            uint16_t did = (static_cast<uint16_t>(data[0]) << 8) | data[1];
-            std::string hex_str;
-            for (size_t i = 0; i < len; i++) {
-                char buf[4];
-                snprintf(buf, sizeof(buf), "%02x", data[i]);
-                hex_str += buf;
-                if (i < len - 1) hex_str += " ";
-            }
-            std::string ascii(data + 2, data + len);
-            printf("Received DID 0x%04x: %s = %s\n", did, hex_str.c_str(), ascii.c_str());
+        // Expect UDS positive response: [0x62, 0xF1, 0x90, <17 ASCII VIN bytes>].
+        std::string hex;
+        for (size_t i = 0; i < len; i++) {
+            char buf[4];
+            snprintf(buf, sizeof(buf), "%02X", data[i]);
+            hex += buf;
+            if (i < len - 1) hex += " ";
+        }
+
+        if (len >= 4 && data[0] == 0x62) {
+            std::string vin(reinterpret_cast<const char*>(data + 3), len - 3);
+            printf("UDS 0x22 ReadDataByIdentifier DID 0xF190 -> %s\n", vin.c_str());
+        } else {
+            printf("UDS response (raw, %u bytes): %s\n", (unsigned)len, hex.c_str());
         }
         stop();
     }

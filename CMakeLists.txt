@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(sdv_diag_gateway LANGUAGES CXX)
+project(sdv_diag_gateway LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -7,8 +7,17 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 find_package(vsomeip3 REQUIRED)
 find_package(Threads REQUIRED)
 
-add_executable(diag_service src/diag_service.cpp)
-target_link_libraries(diag_service PRIVATE vsomeip3 Threads::Threads)
+# Ported C UDS stack (from obd-simulator, adapted). Platform shim included.
+add_library(diag_stack STATIC
+    src/diag/uds_service.c
+    src/diag/diag_session.c
+    src/diag/plat_linux.c
+    src/diag/ota_stub.c)
+target_include_directories(diag_stack PUBLIC src/diag)
+set_target_properties(diag_stack PROPERTIES C_STANDARD 99 C_STANDARD_REQUIRED ON)
+
+add_executable(diag_service src/diag_service.cpp src/diag_bridge.cpp)
+target_link_libraries(diag_service PRIVATE diag_stack vsomeip3 Threads::Threads)
 
 add_executable(diag_client src/diag_client.cpp)
 target_link_libraries(diag_client PRIVATE vsomeip3 Threads::Threads)

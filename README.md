@@ -1,29 +1,69 @@
 # SDV Diagnostic Gateway
 
 C++20 **vsomeip** SOME/IP diagnostic gateway — an Adaptive AUTOSAR / SDV-style
-service that exposes UDS diagnostic methods (ReadDataByIdentifier, etc.) over
-SOME/IP, backed by a CAN-side diagnostic stack.
+service that exposes UDS diagnostic methods (ReadDataByIdentifier,
+DiagnosticSessionControl, …) over SOME/IP, backed by a real C UDS engine.
 
-> **Status: Phase 1 (MVP slice) — verified.** A single SOME/IP service + client
-> proving `ReadDataByIdentifier (UDS 0x22)` over vsomeip. The DID `0xF190` (VIN)
-> round-trip is demonstrated. Later phases port the C ISO-TP/UDS stack, add the
-> SocketCAN transport, and do Yocto packaging.
+> **Status: Phase 2 (in-process UDS engine) — verified.** The vsomeip SOME/IP
+> service is now backed by the real C UDS dispatcher + session manager, ported
+> from `obd-simulator` as a C99 static library. A SOME/IP request carries a raw
+> UDS request; the in-process engine produces the response. Verified end-to-end:
+> `ReadDataByIdentifier 0x22` DID `0xF190` → real VIN `WVWZZZ3CZWE000001`, plus
+> DiagnosticSessionControl (0x10) with P2/P2\* timing, TesterPresent (0x3E), and
+> OBD-II services gated to NRC `0x11`. ISO-TP / SocketCAN routing (Mode B) and
+> Yocto packaging are later phases.
 
-## Architecture (target)
+## Architecture
+
+Two integration modes; **Phase 2 implements Mode A**:
 
 ```
-SOME/IP client ──vsomeip──▶ diag_gateway (C++20)
-                              │  DiagnosticService (SOME/IP methods)
-                              │  C++→C bridge (extern "C")
-                              ▼  diag_stack (C, ported from obd-simulator)
-                              │  iso_tp / uds_service / diag_session
-                              ▼  SocketCAN (vcan0)
-                          ECU simulator
+Mode A (current — in-process UDS engine):
+  SOME/IP client ──vsomeip──▶ diag_service (C++20)
+                                │  on_message: payload = raw UDS request
+                                │  diag_bridge  (extern "C" glue)
+                                ▼  diag_stack  (C99, ported from obd-simulator)
+                                │  uds_service · diag_session · can_addressing
+                                ▼  UDS response relayed verbatim over SOME/IP
+
+Mode B (deferred — CAN routing gateway):
+  SOME/IP ──▶ diag_gateway ──ISO-TP / SocketCAN──▶ legacy ECU on CAN
 ```
 
-Phase 1 implements only the top box: a `diag_service` offering service
-`0x1234` instance `0x0001` with method `0x0001` (ReadDataByIdentifier), and a
-`diag_client` that requests DID `0xF190` and prints the VIN response.
+In Mode A the gateway *terminates* UDS itself (an Adaptive app providing
+diagnostics natively) — a legitimate SDV pattern and the prerequisite for the
+CAN-routing path. `diag_service` offers `0x1234:0x0001`; method `0x0001` is a
+UDS passthrough. `diag_client` sends `{0x22,0xF1,0x90}` and prints the VIN.
+
+### Ported C stack → platform shim
+
+The C files come from `obd-simulator` nearly verbatim; only the HW/RTOS hooks
+are swapped via a tiny Linux shim (`src/diag/plat.h`):
+
+| Original (STM32 / FreeRTOS) | Gateway (Linux) |
+|---|---|
+| `HAL_GetTick()` | `platform_get_tick_ms()` — `clock_gettime(CLOCK_MONOTONIC)` |
+| `Debug_Print()` (UART) | `platform_log()` — `vfprintf(stdout)` |
+| `#include "main.h"` | `<stdint.h>` |
+| OTA flash (0x34/0x36/0x37) | stub → NRC `0x72` (gateway uses RAUC) |
+| OBD-II services (0x01/0x03/…) | gated → NRC `0x11` (legacy bridge not ported) |
+| ISO-TP / FDCAN | not ported (Mode A doesn't need CAN) |
+
+### UDS services
+
+| SID | Service | Status |
+|---|---|---|
+| 0x10 | DiagnosticSessionControl | ✅ functional (P2/P2\*) |
+| 0x11 | ECUReset | ✅ functional |
+| 0x22 | ReadDataByIdentifier | ✅ functional (VIN/HW/SW/ECU name) |
+| 0x27 | SecurityAccess | ✅ functional (seed/key) |
+| 0x2E | WriteDataByIdentifier | ✅ functional |
+| 0x2F | InputOutputControlByIdentifier | ✅ functional |
+| 0x31 | RoutineControl | ✅ functional (DTC-clear is a no-op) |
+| 0x3E | TesterPresent | ✅ functional |
+| 0x34/0x36/0x37 | OTA | handler kept, backend stubbed → NRC `0x72` |
+| 0x01/0x03/0x04/0x07/0x09 | OBD-II | gated → NRC `0x11` |
+| 0x19 | ReadDTCInformation | gated → NRC `0x11` (needs DTC store) |
 
 ## IDs
 
@@ -31,8 +71,8 @@ Phase 1 implements only the top box: a `diag_service` offering service
 |---|---|
 | Service  | `0x1234` |
 | Instance | `0x0001` |
-| Method   | `0x0001` (ReadDataByIdentifier / UDS 0x22) |
-| Sample DID | `0xF190` (VIN) → `DEMOVIN0000000017` |
+| Method   | `0x0001` (UDS passthrough) |
+| Sample DID | `0xF190` (VIN) → `WVWZZZ3CZWE000001` (from `vehicle_config.h`) |
 
 ## Build
 
@@ -57,7 +97,7 @@ load — see Gotchas):
 CFG=$PWD/config/diag-local.json
 VSOMEIP_CONFIGURATION=$CFG ./build/diag_service &   # offers 0x1234 (routing manager)
 sleep 2
-VSOMEIP_CONFIGURATION=$CFG ./build/diag_client      # → "Received DID 0xf190: ... = DEMOVIN0000000017"
+VSOMEIP_CONFIGURATION=$CFG ./build/diag_client      # → "UDS 0x22 ReadDataByIdentifier DID 0xF190 -> WVWZZZ3CZWE000001"
 ```
 
 ## Gotchas (logged for later phases)
@@ -73,14 +113,17 @@ VSOMEIP_CONFIGURATION=$CFG ./build/diag_client      # → "Received DID 0xf190: 
   (`(uint16_t)hi << 8 | lo`).
 - **Config path must be absolute.** `VSOMEIP_CONFIGURATION=./config/...` is not
   loaded; use `$PWD/config/...`.
+- **Build AND run inside the toolbox.** Binaries link `/usr/local/lib` which is
+  in `ld.so.conf` only inside `fedora-toolbox-42`; run them via `toolbox run`.
 
 ## Roadmap
 
 See `../new/vsomeip-gateway-roadmap.md`. Phases:
 
 - [x] **0** — environment + vsomeip build verified
-- [x] **1** — minimal service/client, DID round-trip *(this slice)*
-- [ ] **2** — port C ISO-TP/UDS stack as a static lib + SocketCAN transport
-- [ ] **3** — wire SOME/IP methods to real UDS via the C stack
+- [x] **1** — minimal SOME/IP service/client, DID round-trip
+- [x] **2** — port C UDS engine (`uds_service` + `diag_session`) as a static lib, wired in-process (Mode A)
+- [ ] **2b** — ISO-TP + SocketCAN transport (CAN-routing gateway, Mode B)
+- [ ] **3** — GoogleTest coverage for the UDS dispatcher
 - [ ] **4** — Yocto/RPi3 packaging (Boost = main hurdle)
-- [ ] **5** — GoogleTest, CI, demo, docs
+- [ ] **5** — CI, demo, docs

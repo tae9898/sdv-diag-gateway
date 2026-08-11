@@ -1,4 +1,6 @@
-// Phase 1: minimal vsomeip diagnostic service (ReadDataByIdentifier stub)
+// Phase 2: vsomeip diagnostic service backed by the ported C UDS engine (Mode A).
+// The SOME/IP payload is the raw UDS request byte stream; the in-process UDS
+// dispatcher produces the raw UDS response, relayed verbatim as the response payload.
 #include <csignal>
 #include <cstdio>
 #include <condition_variable>
@@ -7,6 +9,8 @@
 #include <vector>
 #include <vsomeip/vsomeip.hpp>
 
+#include "diag_bridge.h"
+
 #if defined(__linux__) || defined(__QNX__)
 #include <pthread.h>
 #endif
@@ -14,8 +18,7 @@
 // Diagnostic IDs
 static const vsomeip::service_t  SERVICE_ID  = 0x1234;
 static const vsomeip::instance_t INSTANCE_ID = 0x0001;
-static const vsomeip::method_t   METHOD_ID   = 0x0001; // ReadDataByIdentifier (UDS 0x22)
-static const uint16_t           DID_VIN     = 0xF190;
+static const vsomeip::method_t   METHOD_ID   = 0x0001; // UDS passthrough
 
 class diag_service {
 public:
@@ -39,6 +42,8 @@ public:
             fprintf(stderr, "diag_service: init failed\n");
             return false;
         }
+        // Bring up the in-process UDS engine (session manager + dispatcher).
+        diag_init();
         app_->register_message_handler(SERVICE_ID, INSTANCE_ID, METHOD_ID,
             [this](const std::shared_ptr<vsomeip::message>& req) { on_message(req); });
         app_->register_state_handler(
@@ -62,27 +67,26 @@ private:
         }
     }
 
-    // ReadDataByIdentifier handler
+    // UDS passthrough: the SOME/IP payload IS the raw UDS request.
     void on_message(const std::shared_ptr<vsomeip::message>& req) {
         auto pl = req->get_payload();
         const auto* data = pl->get_data();
         auto len = pl->get_length();
 
+        // Run the in-process C UDS dispatcher.
+        uint8_t resp_buf[DIAG_RESP_MAX];
+        size_t resp_len = 0;
+        diag_dispatch(data, len, resp_buf, &resp_len);
+
         std::vector<vsomeip::byte_t> resp_data;
-        if (len >= 2) {
-            vsomeip::byte_t did_hi = data[0], did_lo = data[1];
-            uint16_t did = (static_cast<uint16_t>(did_hi) << 8) | did_lo;
-            printf("diag_service: received DID 0x%04x\n", did);
-            if (did == DID_VIN) {
-                const char vin[] = "DEMOVIN0000000017";
-                resp_data = {did_hi, did_lo};
-                resp_data.insert(resp_data.end(), std::begin(vin), std::end(vin) - 1);
-            } else {
-                resp_data = {did_hi, did_lo, 0x00};
-                printf("diag_service: unknown DID 0x%04x\n", did);
-            }
+        if (resp_len > 0) {
+            resp_data.assign(resp_buf, resp_buf + resp_len);
+        } else if (len > 0) {
+            // Dispatcher produced no response (e.g. TesterPresent suppress, or
+            // functional suppression) -> negative response service-not-supported.
+            resp_data = {0x7F, data[0], 0x11};
         } else {
-            resp_data = {0x00};
+            resp_data = {0x7F, 0x00, 0x11};
         }
 
         auto resp = rtm_->create_response(req);
@@ -90,7 +94,7 @@ private:
         resp_pl->set_data(resp_data);
         resp->set_payload(resp_pl);
         app_->send(resp);
-        printf("diag_service: response sent\n");
+        printf("diag_service: UDS response sent (%zu bytes)\n", resp_len);
     }
 
     // Graceful shutdown (called from stop_thread_)
