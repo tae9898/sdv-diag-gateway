@@ -100,6 +100,21 @@ sleep 2
 VSOMEIP_CONFIGURATION=$CFG ./build/diag_client      # → "UDS 0x22 ReadDataByIdentifier DID 0xF190 -> WVWZZZ3CZWE000001"
 ```
 
+## Tests
+
+GoogleTest regression suite for the UDS engine — hermetic (no vsomeip):
+
+```bash
+toolbox run --container fedora-toolbox-42 bash -lc '
+  cd /var/home/playtron/work/stm/sdv-diag-gateway
+  cmake -B build -S . && cmake --build build -j$(nproc)
+  ctest --test-dir build --output-on-failure'
+```
+
+8 tests: ReadDataByIdentifier (VIN / HW version / unknown-DID→NRC 0x31),
+DiagnosticSessionControl (P2/P2\*), TesterPresent, OBD-II gating (NRC 0x11),
+and the OTA security gate (NRC 0x33).
+
 ## Gotchas (logged for later phases)
 
 - **`/usr/local/lib` not in the linker path.** vsomeip installs to
@@ -124,6 +139,6 @@ See `../new/vsomeip-gateway-roadmap.md`. Phases:
 - [x] **1** — minimal SOME/IP service/client, DID round-trip
 - [x] **2** — port C UDS engine (`uds_service` + `diag_session`) as a static lib, wired in-process (Mode A)
 - [ ] **2b** — ISO-TP + SocketCAN transport (CAN-routing gateway, Mode B)
-- [ ] **3** — GoogleTest coverage for the UDS dispatcher
+- [x] **3** — GoogleTest coverage for the UDS dispatcher (8 tests via ctest)
 - [ ] **4** — Yocto/RPi3 packaging (Boost = main hurdle)
 - [ ] **5** — CI, demo, docs
