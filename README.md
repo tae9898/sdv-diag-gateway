@@ -1,5 +1,7 @@
 # SDV Diagnostic Gateway
 
+[![CI](https://github.com/tae9898/sdv-diag-gateway/actions/workflows/ci.yml/badge.svg)](https://github.com/tae9898/sdv-diag-gateway/actions/workflows/ci.yml)
+
 C++20 **vsomeip** SOME/IP diagnostic gateway — an Adaptive AUTOSAR / SDV-style
 service that exposes UDS diagnostic methods (ReadDataByIdentifier,
 DiagnosticSessionControl, …) over SOME/IP, backed by a real C UDS engine.
@@ -141,4 +143,4 @@ See `../new/vsomeip-gateway-roadmap.md`. Phases:
 - [ ] **2b** — ISO-TP + SocketCAN transport (CAN-routing gateway, Mode B)
 - [x] **3** — GoogleTest coverage for the UDS dispatcher (8 tests via ctest)
 - [ ] **4** — Yocto/RPi3 packaging (Boost = main hurdle)
-- [ ] **5** — CI, demo, docs
+- [ ] **5** — CI ✅ (two-job workflow: hermetic tests + full Ubuntu build with vsomeip) · demo script & docs polish pending
