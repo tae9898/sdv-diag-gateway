@@ -6,21 +6,20 @@ C++20 **vsomeip** SOME/IP diagnostic gateway — an Adaptive AUTOSAR / SDV-style
 service that exposes UDS diagnostic methods (ReadDataByIdentifier,
 DiagnosticSessionControl, …) over SOME/IP, backed by a real C UDS engine.
 
-> **Status: Phase 2 (in-process UDS engine) — verified.** The vsomeip SOME/IP
-> service is now backed by the real C UDS dispatcher + session manager, ported
-> from `obd-simulator` as a C99 static library. A SOME/IP request carries a raw
-> UDS request; the in-process engine produces the response. Verified end-to-end:
-> `ReadDataByIdentifier 0x22` DID `0xF190` → real VIN `WVWZZZ3CZWE000001`, plus
-> DiagnosticSessionControl (0x10) with P2/P2\* timing, TesterPresent (0x3E), and
-> OBD-II services gated to NRC `0x11`. ISO-TP / SocketCAN routing (Mode B) and
-> Yocto packaging are later phases.
+> **Status: Phase 2b (CAN-routing gateway, Mode B) — verified.** Two transports,
+> selected at startup by `DIAG_TRANSPORT`: **Mode A** (default) answers UDS with
+> the in-process C engine; **Mode B** (`=can`) routes the request over
+> ISO-TP/SocketCAN to the ECU on CAN (`0x7E0`) and relays its response.
+> Verified end-to-end against the real STM32 (`obd-simulator` firmware):
+> SOME/IP → gateway → CAN → ECU → VIN `WVWZZZ3CZWE000001` back over SOME/IP
+> (~9 ms round-trip, FD SF-escape frame). Yocto packaging is a later phase.
 
 ## Architecture
 
-Two integration modes; **Phase 2 implements Mode A**:
+Two integration modes, selected at startup (`DIAG_TRANSPORT=local|can`):
 
 ```
-Mode A (current — in-process UDS engine):
+Mode A (default — in-process UDS engine):
   SOME/IP client ──vsomeip──▶ diag_service (C++20)
                                 │  on_message: payload = raw UDS request
                                 │  diag_bridge  (extern "C" glue)
@@ -28,14 +27,20 @@ Mode A (current — in-process UDS engine):
                                 │  uds_service · diag_session · can_addressing
                                 ▼  UDS response relayed verbatim over SOME/IP
 
-Mode B (deferred — CAN routing gateway):
-  SOME/IP ──▶ diag_gateway ──ISO-TP / SocketCAN──▶ legacy ECU on CAN
+Mode B (Phase 2b — CAN routing gateway):
+  SOME/IP client ──vsomeip──▶ diag_service (C++20)
+                                │  socketcan_transport  (AF_CAN, filter 0x7E8)
+                                ▼  iso_tp  (C99, ported — tester role)
+                                ▼  CAN-FD 500k/2M (CANable / can0)
+                                ▼  legacy ECU (STM32 obd-simulator, 0x7E0→0x7E8)
+                                ▼  UDS response reassembled, relayed over SOME/IP
 ```
 
 In Mode A the gateway *terminates* UDS itself (an Adaptive app providing
-diagnostics natively) — a legitimate SDV pattern and the prerequisite for the
-CAN-routing path. `diag_service` offers `0x1234:0x0001`; method `0x0001` is a
-UDS passthrough. `diag_client` sends `{0x22,0xF1,0x90}` and prints the VIN.
+diagnostics natively); in Mode B it *routes* UDS to a legacy CAN ECU — the
+classic SDV zonal-gateway pattern. In both modes `diag_service` offers
+`0x1234:0x0001`; method `0x0001` is a UDS passthrough. `diag_client` sends
+`{0x22,0xF1,0x90}` and prints the VIN.
 
 ### Ported C stack → platform shim
 
@@ -49,7 +54,8 @@ are swapped via a tiny Linux shim (`src/diag/plat.h`):
 | `#include "main.h"` | `<stdint.h>` |
 | OTA flash (0x34/0x36/0x37) | stub → NRC `0x72` (gateway uses RAUC) |
 | OBD-II services (0x01/0x03/…) | gated → NRC `0x11` (legacy bridge not ported) |
-| ISO-TP / FDCAN | not ported (Mode A doesn't need CAN) |
+| ISO-TP (Mode B) | ported as **tester role**: RX accepts `0x7E8`, FC → `can_id−8`, responses delivered upward via handler |
+| FDCAN HAL TX | `platform_can_send()` over SocketCAN (`CANFD_BRS`, kernel does the FD DLC round-up) |
 
 ### UDS services
 
@@ -102,6 +108,32 @@ sleep 2
 VSOMEIP_CONFIGURATION=$CFG ./build/diag_client      # → "UDS 0x22 ReadDataByIdentifier DID 0xF190 -> WVWZZZ3CZWE000001"
 ```
 
+## Run (Mode B — CAN routing to the STM32 ECU)
+
+Requires the `obd-simulator` ECU on the bus (`can0`, CAN-FD 500k/2M) and the
+interface UP (`ip link set can0 up type can fd on bitrate 500000 dbitrate 2000000`).
+
+```bash
+candump -tz can0 &                                   # watch the bus (optional)
+CFG=$PWD/config/diag-local.json
+VSOMEIP_CONFIGURATION=$CFG DIAG_TRANSPORT=can ./build/diag_service &
+sleep 2
+VSOMEIP_CONFIGURATION=$CFG ./build/diag_client
+```
+
+Env vars: `DIAG_TRANSPORT` = `local` (default, Mode A) | `can` (Mode B);
+`DIAG_CAN_IF` = interface name (default `can0`). If CAN init fails in `can`
+mode the service exits — no silent fallback to Mode A.
+
+Expected on the bus (VIN request, ~9 ms round-trip):
+
+```
+can0  7E0  [04]  03 22 F1 90                          # gateway → ECU (SF)
+can0  7E8  [24]  00 14 62 F1 90 57 56 57 5A … 31 CC CC # ECU → gateway (FD SF-escape, VIN)
+```
+
+A request the ECU doesn't answer within 2 s yields `7F <SID> 11` over SOME/IP.
+
 ## Tests
 
 GoogleTest regression suite for the UDS engine — hermetic (no vsomeip):
@@ -113,9 +145,13 @@ toolbox run --container fedora-toolbox-42 bash -lc '
   ctest --test-dir build --output-on-failure'
 ```
 
-8 tests: ReadDataByIdentifier (VIN / HW version / unknown-DID→NRC 0x31),
-DiagnosticSessionControl (P2/P2\*), TesterPresent, OBD-II gating (NRC 0x11),
-and the OTA security gate (NRC 0x33).
+16 tests: UDS engine — ReadDataByIdentifier (VIN / HW version /
+unknown-DID→NRC 0x31), DiagnosticSessionControl (P2/P2\*), TesterPresent,
+OBD-II gating (NRC 0x11), OTA security gate (NRC 0x33); ISO-TP client —
+SF request framing, SF/escape-SF response delivery, multi-frame response
+(FC to `0x7E0` + reassembly), foreign-ID filtering, multi-frame request
+(FF/FC/CF), TX/RX timeouts, CF sequence mismatch. ISO-TP tests inject
+`platform_can_send` at link time (no CAN hardware needed).
 
 ## Gotchas (logged for later phases)
 
@@ -140,7 +176,7 @@ See `../new/vsomeip-gateway-roadmap.md`. Phases:
 - [x] **0** — environment + vsomeip build verified
 - [x] **1** — minimal SOME/IP service/client, DID round-trip
 - [x] **2** — port C UDS engine (`uds_service` + `diag_session`) as a static lib, wired in-process (Mode A)
-- [ ] **2b** — ISO-TP + SocketCAN transport (CAN-routing gateway, Mode B)
+- [x] **2b** — ISO-TP + SocketCAN transport (CAN-routing gateway, Mode B) ✅ verified against the STM32 ECU
 - [x] **3** — GoogleTest coverage for the UDS dispatcher (8 tests via ctest)
 - [ ] **4** — Yocto/RPi3 packaging (Boost = main hurdle)
 - [ ] **5** — CI ✅ (two-job workflow: hermetic tests + full Ubuntu build with vsomeip) · demo script & docs polish pending

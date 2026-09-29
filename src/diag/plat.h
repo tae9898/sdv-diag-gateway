@@ -17,6 +17,13 @@ uint32_t platform_get_tick_ms(void);
 /** printf-style log to stdout (replaces Debug_Print). */
 void platform_log(const char *fmt, ...);
 
+/**
+ * Transmit one CAN(-FD) frame. len is the payload byte count (0..64); the
+ * implementation handles FD DLC round-up. Returns 0 on success, -1 on error.
+ * Implemented by the transport (socketcan_transport.cpp) or the test shim.
+ */
+int platform_can_send(uint32_t can_id, const uint8_t *data, uint8_t len);
+
 #ifdef __cplusplus
 }
 #endif

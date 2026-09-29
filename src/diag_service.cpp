@@ -1,8 +1,11 @@
-// Phase 2: vsomeip diagnostic service backed by the ported C UDS engine (Mode A).
-// The SOME/IP payload is the raw UDS request byte stream; the in-process UDS
-// dispatcher produces the raw UDS response, relayed verbatim as the response payload.
+// Phase 2/2b: vsomeip diagnostic service. The SOME/IP payload is the raw UDS
+// request byte stream. Mode A (default): the in-process C UDS engine answers.
+// Mode B (DIAG_TRANSPORT=can): the request is routed over ISO-TP/SocketCAN to
+// the ECU on CAN (0x7E0) and the ECU's response is relayed verbatim.
 #include <csignal>
 #include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <condition_variable>
 #include <mutex>
 #include <thread>
@@ -10,6 +13,7 @@
 #include <vsomeip/vsomeip.hpp>
 
 #include "diag_bridge.h"
+#include "transport/socketcan_transport.h"
 
 #if defined(__linux__) || defined(__QNX__)
 #include <pthread.h>
@@ -19,6 +23,9 @@
 static const vsomeip::service_t  SERVICE_ID  = 0x1234;
 static const vsomeip::instance_t INSTANCE_ID = 0x0001;
 static const vsomeip::method_t   METHOD_ID   = 0x0001; // UDS passthrough
+
+// Mode B: ECU round-trip budget. P2=50ms and N_Cr/N_Bs=1000ms fit with margin.
+static const uint32_t CAN_REQ_TIMEOUT_MS = 2000;
 
 class diag_service {
 public:
@@ -42,8 +49,23 @@ public:
             fprintf(stderr, "diag_service: init failed\n");
             return false;
         }
-        // Bring up the in-process UDS engine (session manager + dispatcher).
-        diag_init();
+        // Transport selection (once): DIAG_TRANSPORT=can routes UDS over
+        // ISO-TP/SocketCAN (Mode B); anything else uses the in-process UDS
+        // engine (Mode A, default). DIAG_CAN_IF selects the interface.
+        const char* transport = getenv("DIAG_TRANSPORT");
+        use_can_ = (transport != nullptr && strcmp(transport, "can") == 0);
+        if (use_can_) {
+            const char* iface = getenv("DIAG_CAN_IF");
+            if (iface == nullptr) iface = "can0";
+            if (can_transport_init(iface) != 0) {
+                fprintf(stderr, "diag_service: CAN transport init failed on %s\n", iface);
+                return false;  // explicit opt-in must work; no silent fallback
+            }
+            printf("diag_service: Mode B (CAN transport, iface %s)\n", iface);
+        } else {
+            // Bring up the in-process UDS engine (session manager + dispatcher).
+            diag_init();
+        }
         app_->register_message_handler(SERVICE_ID, INSTANCE_ID, METHOD_ID,
             [this](const std::shared_ptr<vsomeip::message>& req) { on_message(req); });
         app_->register_state_handler(
@@ -73,10 +95,18 @@ private:
         const auto* data = pl->get_data();
         auto len = pl->get_length();
 
-        // Run the in-process C UDS dispatcher.
         uint8_t resp_buf[DIAG_RESP_MAX];
         size_t resp_len = 0;
-        diag_dispatch(data, len, resp_buf, &resp_len);
+        if (use_can_) {
+            // Mode B: route the request over ISO-TP/SocketCAN to the ECU.
+            if (can_transport_request(data, len, resp_buf, DIAG_RESP_MAX,
+                                      &resp_len, CAN_REQ_TIMEOUT_MS) < 0) {
+                resp_len = 0;  // timeout/error -> shared 0x7F fallback below
+            }
+        } else {
+            // Mode A: run the in-process C UDS dispatcher.
+            diag_dispatch(data, len, resp_buf, &resp_len);
+        }
 
         std::vector<vsomeip::byte_t> resp_data;
         if (resp_len > 0) {
@@ -108,6 +138,7 @@ private:
 
     std::shared_ptr<vsomeip::runtime>  rtm_;
     std::shared_ptr<vsomeip::application> app_;
+    bool use_can_ = false;
     bool stop_;
     std::mutex mutex_;
     std::condition_variable cond_;

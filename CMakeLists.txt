@@ -15,13 +15,15 @@ find_package(GTest REQUIRED)
 add_library(diag_stack STATIC
     src/diag/uds_service.c
     src/diag/diag_session.c
+    src/diag/iso_tp.c
     src/diag/plat_linux.c
     src/diag/ota_stub.c)
 target_include_directories(diag_stack PUBLIC src/diag)
 set_target_properties(diag_stack PROPERTIES C_STANDARD 99 C_STANDARD_REQUIRED ON)
 
 if(vsomeip3_FOUND)
-add_executable(diag_service src/diag_service.cpp src/diag_bridge.cpp)
+add_executable(diag_service src/diag_service.cpp src/diag_bridge.cpp
+    src/transport/socketcan_transport.cpp)
 target_link_libraries(diag_service PRIVATE diag_stack vsomeip3 Threads::Threads)
 
 add_executable(diag_client src/diag_client.cpp)
@@ -33,6 +35,7 @@ endif()
 # --- Test suite (links diag_stack + diag_bridge, NO vsomeip) ---
 add_executable(diag_tests
     tests/test_uds_dispatcher.cpp
+    tests/test_iso_tp.cpp
     src/diag_bridge.cpp)
 target_link_libraries(diag_tests PRIVATE
     diag_stack
