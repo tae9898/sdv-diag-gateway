@@ -168,6 +168,12 @@ SF request framing, SF/escape-SF response delivery, multi-frame response
   loaded; use `$PWD/config/...`.
 - **Build AND run inside the toolbox.** Binaries link `/usr/local/lib` which is
   in `ld.so.conf` only inside `fedora-toolbox-42`; run them via `toolbox run`.
+- **vsomeip 3.7 SD never starts on a multi-homed host** (remote-client mode).
+  3.7 gates service discovery on a netlink-confirmed route to the SD multicast
+  group; with the default route on another interface (e.g. wlan0), it waits
+  forever — no socket on 30490, no error. Fix: `sudo ip route add 224.0.0.222/32 dev eth0`
+  (runtime-only; re-add after reboot). vsomeip 3.4.10 (the Yocto/RPi3 image) has
+  no such gate.
 
 ## Roadmap
 
@@ -178,5 +184,5 @@ See `../new/vsomeip-gateway-roadmap.md`. Phases:
 - [x] **2** — port C UDS engine (`uds_service` + `diag_session`) as a static lib, wired in-process (Mode A)
 - [x] **2b** — ISO-TP + SocketCAN transport (CAN-routing gateway, Mode B) ✅ verified against the STM32 ECU
 - [x] **3** — GoogleTest coverage for the UDS dispatcher (8 tests via ctest)
-- [ ] **4** — Yocto/RPi3 packaging (Boost = main hurdle)
+- [x] **4** — Yocto/RPi3 packaging ✅ (`core-image-diag-gw`, meta-networking/vsomeip 3.4.10, verified on-target: RPi3 → CAN → STM32 VIN, both local and PC-remote clients)
 - [ ] **5** — CI ✅ (two-job workflow: hermetic tests + full Ubuntu build with vsomeip) · demo script & docs polish pending

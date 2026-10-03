@@ -1,0 +1,22 @@
+{
+    "unicast": "10.42.0.1",
+    "netmask": "255.255.255.0",
+    "logging": {
+        "level": "info",
+        "console": "true"
+    },
+    "applications": [
+        {
+            "name": "diag_client",
+            "id": "0x5555"
+        }
+    ],
+    "routing": "diag_client",
+    "service-discovery": {
+        "enable": "true",
+        "multicast": "224.0.0.222",
+        "port": "30490",
+        "protocol": "udp",
+        "ttl": "3"
+    }
+}
