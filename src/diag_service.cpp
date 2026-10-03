@@ -33,7 +33,10 @@ public:
         : rtm_(vsomeip::runtime::get()),
           app_(rtm_->create_application("diag_service")),
           stop_(false) {
-        stop_thread_ = std::thread{&diag_service::shutdown, this};
+        // stop_thread_ is NOT started here: on an init() failure main()
+        // returns and the destructor would join a thread that waits for
+        // stop_ forever (exit hang observed on the target). It is started
+        // in start(), i.e. only on the success path.
     }
 
     ~diag_service() {
@@ -73,7 +76,10 @@ public:
         return true;
     }
 
-    void start() { app_->start(); }
+    void start() {
+        stop_thread_ = std::thread{&diag_service::shutdown, this};
+        app_->start();
+    }
 
     void terminate() {
         std::scoped_lock lk(mutex_);
